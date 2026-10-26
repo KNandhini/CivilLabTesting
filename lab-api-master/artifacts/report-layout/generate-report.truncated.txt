@@ -1,0 +1,713 @@
+import { formatObservationValue } from './observation-value';
+import PDFDocument from 'pdfkit'
+import { Response } from 'express';
+import * as QRCode from 'qrcode';
+import { images } from './images';
+import { calculateObservationAverageRow, calculateEntryPageAverageRow } from './observation-average';
+
+import path from 'path';
+
+
+import configuration from '../configuration.json';
+import { ProductTestSampleMapping } from '../sample-collection/entities/product-test-sample-mapping.entity';
+import { SampleCollection } from 'src/sample-collection/entities/sample-collection.entity';
+import { ObservationEntry } from '../observation-entry/entities/observation-entry.entity';
+import { Test } from '../tests/entities/test.entity';
+import { SystemSettingsDataDto } from 'src/system-settings/dto/system-settings.dto';
+import { ReportSchemaDto } from 'src/report-schema/dto/types';
+import { ReportSchema } from 'src/report-schema';
+import { reportItem, reportNos } from 'src/requests/dto/types';
+import { ProductsService } from 'src/products/products.service';
+import { RequestsService } from 'src/requests/requests.service';
+import { AppRequestsService } from 'src/mobile-app/app-requests/app-requests.service';
+import { Product } from 'src/products/entities/product.entity';
+import { SystemSettingsService } from 'src/system-settings/system-settings.service';
+
+interface ReportData {
+  reportSchemas: ReportSchema[];
+  observationEntries?: ObservationEntry[];
+  sampleCollection?: SampleCollection;
+  productTestSampleMapping?: ProductTestSampleMapping;
+  formId?: string;
+  contractData: TestRequestFormData; // Keep existing contractData if it's used elsewhere
+  mappings?: {
+    samples: SampleCollection[];
+    mappings: ProductTestSampleMapping[];
+  };
+  systemSettings: SystemSettingsDataDto;
+}
+
+interface TestRequestFormData {
+  trfNo: string;
+  date: string;
+  customerName: string;
+  address: string;
+  contactPerson: string;
+  phone: string;
+  customerLetterNoDate: string;
+  workName: string;
+  location: string;
+  dateOfCastingAndGradeOfConcrete: string;
+  conformityRequired: boolean;
+  deviationFromTestMethods: boolean;
+  isMethodInappropriate: string;
+  witnessRequest: boolean;
+  testRequest: string;
+  modeOfDelivery: string;
+  simplifiedWay: boolean;
+  addressedToOtherOrg: boolean;
+  otherOrgDetails: string;
+  decisionRule: string;
+  witnessName: string;
+  witnessDesignation: string;
+  witnessDetails: string;
+  witnessEmailId: string;
+  witnessContactNo: string;
+  revisionNo: string | number;
+  revisionDate: string;
+  issueNo: string | number;
+  issueDate: string;
+  email: string;
+  sampleRows?: string[][];
+  reportNo: reportItem[];
+  TOCR: string;
+  TRFNo: string;
+  createdDate: string;
+  sizeOfMetal: string;
+  shapeOfBlock: string;
+  source: string;
+  sampleReceivedBy: string;
+  sampleCondition: string;
+  remarks: string;
+  resourcesAvailable: boolean;
+  testMethodVerified: boolean;
+  pertinentDiscussion: boolean;
+  sampleEfficiency: boolean;
+  sampleConditionReceived: boolean;
+  requestId:string;
+  environmentCondition:string;
+  brandName:string;
+  humidity:string;
+  appRequestId:string;
+  totalUlrNo:number;
+  products: Product[];
+  temperature:string;
+  detailsOfMachine:string;
+  dateOfCalibration:string;
+  loadingRange:string;
+  curingCondition:string;
+  sampleReceivedDate:string;
+  reportType:string;
+  authorisedSignatory:string;
+}
+
+interface GroupedMapping {
+  test: string;
+  method: string;
+  products: Set<string>;
+}
+
+function drawCheckbox(doc: PDFDocument, x: number, y: number, checked: boolean) {
+  // Set black color and increased stroke width for checkbox border
+  const originalStrokeColor = '#A0A0A0';
+  const originalLineWidth = 0.5
+  doc.strokeColor('black');
+  doc.lineWidth(0.8); // Increased stroke width for checkboxes
+  
+  doc.rect(x, y, 10, 10).stroke();
+  if (checked) {
+    doc.moveTo(x + 2, y + 5).lineTo(x + 5, y + 8).lineTo(x + 8, y + 2).stroke();
+  }
+  
+  // Reset to original color and line width
+  doc.strokeColor(originalStrokeColor);
+  doc.lineWidth(originalLineWidth);
+}
+
+function getTextHeight(doc: PDFDocument, text: string, options: any) {
+  const { width, fontSize, font } = options;
+  doc.font(font || 'Calibri').fontSize(fontSize || 10);
+  return doc.heightOfString(text, { width });
+}
+
+export async function generateReport(data: ReportData, res: Response, productService: ProductsService, requestsService: RequestsService, appRequestService:AppRequestsService, mobileRequest =false, referrer:string, systemSettingsService: SystemSettingsService, inline = false) {
+  const doc = new PDFDocument({ margin: 20, size: 'A4' });
+  doc.registerFont('Calibri-Bold-Italic', path.join(__dirname, '../calibri/calibri-bold-italic.ttf'));
+  doc.registerFont('Calibri-Bold', path.join(__dirname,'../calibri/calibri-bold.ttf'));
+  doc.registerFont('Calibri-Italic', path.join(__dirname,'../calibri/calibri-italic.ttf'));
+  doc.registerFont('Calibri', path.join(__dirname,'../calibri/calibri-regular.ttf'));
+
+
+
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', inline ? 'inline; filename="test-report.pdf"' : 'attachment; filename="test-request-form.pdf"');
+
+  doc.pipe(res);
+  // Set grey color for borders
+  doc.strokeColor('#A0A0A0');
+  // Set reduced stroke width for thinner borders
+  doc.lineWidth(0.5);
+
+  const observationGroups = Object.entries(
+    data?.observationEntries?.reduce((groups: any, observation: ObservationEntry) => {
+      const testId = observation.productTestSampleMapping.test.id;
+      if (!groups[testId]) {
+        groups[testId] = [];
+      }
+      groups[testId].push(observation);
+      return groups;
+    }, {}) || {}
+  );
+  if(!mobileRequest) {
+  // Generate other sections
+  if (data.contractData) {
+    ContractReviewForm(doc, data.contractData, data.systemSettings);
+  }
+  doc.addPage();
+  if (data.mappings) {
+    sampleCollectionReport(doc, data);
+
+  }
+  doc.addPage();
+  // Generate TOCR report
+  generateTOCRReport(doc, data);
+
+  
+  for(const [testId, observations] of observationGroups){
+    const typedObservations = observations as ObservationEntry[];
+    doc.addPage();
+    await generateObservationEntryPage(doc, data, typedObservations);
+  }
+
+//   const pagePromises = await observationGroups.map(async ([testId, observations]: [string, unknown]) => {
+//     const typedObservations = observations as ObservationEntry[];
+//     await new Promise(resolve => setTimeout(resolve, 500));
+//   doc.addPage();
+
+//     await generateObservationEntryPage(doc, data, typedObservations);
+//     await new Promise(resolve => setTimeout(resolve, 1000));
+//     await addQRCodeToPage(doc, data.contractData.requestId, referrer);
+//     await new Promise(resolve => setTimeout(resolve, 1000));
+    
+//     // doc.addPage();
+//     // await TestReportPage(doc, data, typedObservations, reportData, false, data.contractData.requestId, referrer);
+//     // await new Promise(resolve => setTimeout(resolve, 1000));
+//     // doc.addPage();
+//     // await TestReportPage(doc, data, typedObservations, reportData, true, data.contractData.requestId, referrer);
+//     // await new Promise(resolve => setTimeout(resolve, 1000));
+
+//   });
+
+
+//   await Promise.all([...pagePromises]);
+ }
+
+
+
+ 
+  // For each observation group, calculate averages of the result fields, including schemaId
+  const observationGroupAverages = observationGroups.map(([testId, observations]: [string, any]) => {
+    const typedObservations = observations as ObservationEntry[];
+    if (!typedObservations.length) return { testId, schemaId: '', averages: {}, testName: '', testingMethod: '', startDate:'', endDate:'', productName:'', unit:'' };
+
+    // Get schemaId from the first observation (if available)
+    const schemaId = typedObservations[0]?.schemaId || '';
+
+    // Collect all result field names (assume all entries have same result structure)
+    const resultFields = typedObservations[0].result.map((r: any) => r.field);
+
+    // For each result field, calculate average (only for numeric values and only if averageCalculationRequired is true)
+    const averages: Record<string, string> = {};
+    for (let i = 0; i < resultFields.length; i++) {
+      const field = resultFields[i];
+      let sum = 0;
+      let count = 0;
+      let nil ='';
+      const fieldType = typedObservations[0]?.result[i]?.type;
+      const isStringField = fieldType === 'text' || fieldType === 'string';
+      for (const entry of typedObservations) {
+        const value = entry.result[i]?.value;
+        if (isStringField) { nil = value; continue; }
+        const num = Number(value);
+        if (!isNaN(num)) {
+          sum += num;
+          count++;
+        }
+        else{
+          nil = value;
+        }
+      }
+      if (!isStringField && count > 0) {
+        const avg = sum / count;
+        const avgStr = avg.toFixed(2);
+        averages[field] = avgStr.endsWith('.00') ? avg.toFixed(0) : avgStr;
+      } else {
+        averages[field] = nil;
+      }
+    }
+
+    // Get TestName and TestingMethod from the first observation
+    const testName = typedObservations[0]?.productTestSampleMapping?.test?.name || '';
+    const unit = typedObservations[0]?.productTestSampleMapping?.test?.unit || '';
+    const testingMethod = typedObservations[0]?.productTestSampleMapping?.test?.testingMethod || '';
+    const startDate = typedObservations[0]?.testStartDate;
+    const endDate = typedObservations[0]?.testCompletionDate;
+    const productName = typedObservations[0]?.productTestSampleMapping?.product?.name;
+    const productId = typedObservations[0]?.productTestSampleMapping?.product?.id;
+    const productShortForm = typedObservations[0]?.productTestSampleMapping?.product?.productShortForm;
+    const reportNo = typedObservations[0]?.productTestSampleMapping?.product?.reportNo;
+    return { testId, schemaId, averages, testName, testingMethod, startDate, endDate, productName, productId, productShortForm, reportNo };
+  });
+
+  // Instead of calculating averages, just collect the raw result values for each observation group
+  const observationGroupRawResults = observationGroups.map(([testId, observations]: [string, any]) => {
+    const typedObservations = observations as ObservationEntry[];
+    if (!typedObservations.length) return { testId, schemaId: '', results: [], testName: '', testingMethod: '', sampleId:'', startDate:'', endDate:'', productName:'', unit:'' };
+
+    // Get schemaId from the first observation (if available)
+    const schemaId = typedObservations[0]?.schemaId || '';
+
+    // Collect all result field names (assume all entries have same result structure)
+    const resultFields = typedObservations[0].result.map((r: any) => r.field);
+
+    // For each observation, collect its result values as an object { field: value }
+    const results = typedObservations.map(entry => {
+      const resultObj: Record<string, any> = {};
+      for (let i = 0; i < resultFields.length; i++) {
+        const field = resultFields[i];
+        resultObj[field] = formatObservationValue(entry.result[i]?.value, entry.result[i]?.type, 'nil');
+      }
+      resultObj['sampleId'] = entry.productTestSampleMapping.sample.sampleId;
+      return resultObj;
+    });
+
+    // Get TestName and TestingMethod from the first observation
+    const testName = typedObservations[0]?.productTestSampleMapping?.test?.name || '';
+    const unit = typedObservations[0]?.productTestSampleMapping?.test?.unit || '';
+    const testingMethod = typedObservations[0]?.productTestSampleMapping?.test?.testingMethod || '';
+    const sampleId = typedObservations[0]?.productTestSampleMapping.sample.sampleId;
+    const startDate = typedObservations[0]?.testStartDate;
+    const endDate = typedObservations[0]?.testCompletionDate;
+    const productName = typedObservations[0]?.productTestSampleMapping?.product?.name;
+    const productId = typedObservations[0]?.productTestSampleMapping?.product?.id;
+    const productShortForm = typedObservations[0]?.productTestSampleMapping?.product?.productShortForm;
+    const reportNo = typedObservations[0]?.productTestSampleMapping?.product?.reportNo;
+
+    return { testId, schemaId, results, testName, testingMethod, sampleId, startDate, endDate, productName, productId, productShortForm, reportNo, unit };
+  });
+
+
+  // For each observationGroupRawResults, sort its results array by sampleId (numeric if possible, else string)
+  observationGroupRawResults.forEach(group => {
+    if (Array.isArray(group.results)) {
+      group.results.sort((a:any, b:any) => {
+        const aId = a.SampleId ?? a.sampleId;
+        const bId = b.SampleId ?? b.sampleId;
+        // Try numeric comparison first
+        const aNum = Number(aId);
+        const bNum = Number(bId);
+        if (!isNaN(aNum) && !isNaN(bNum)) {
+          return aNum - bNum;
+        }
+        // Fallback to string comparison
+        return String(aId).localeCompare(String(bId), undefined, { numeric: true, sensitivity: 'base' });
+      });
+    }
+  });
+
+
+
+
+  // Map observationGroupAverages for quick lookup by testId+schemaId
+  const averagesMap = new Map<string, any>();
+  for (const avg of observationGroupAverages) {
+    if (avg && avg.testId && avg.schemaId) {
+      averagesMap.set(`${avg.testId}__${avg.schemaId}`, avg.averages);
+    }
+  }
+
+  // Prepare processed report schemas with averages from observationGroupAverages
+  // Include reportSchemas that have TestReportSchema OR ObservationEntrySchema OR both
+  const processedReportSchemas = Array.isArray(data.reportSchemas)
+    ? data.reportSchemas
+        .map((schema: any) => {
+          // Check if schema has TestReportSchema
+          const hasTestReportSchema = schema?.TestReportSchema?.TestReportSchema?.rows && 
+                                    Array.isArray(schema.TestReportSchema.TestReportSchema.rows) && 
+                                    Array.isArray(schema.TestReportSchema.TestReportSchema.columns);
+          
+          // Check if schema has ObservationEntrySchema
+          const hasObservationEntrySchema = schema?.TestReportSchema?.ObservationEntrySchema?.rows && 
+                                         Array.isArray(schema.TestReportSchema.ObservationEntrySchema.rows) && 
+                                         Array.isArray(schema.TestReportSchema.ObservationEntrySchema.columns);
+
+          // If schema has neither, skip it
+          if (!hasTestReportSchema && !hasObservationEntrySchema) return null;
+
+          let processedTestReportRows = null;
+          let processedObservationEntryRows = null;
+
+          // Process TestReportSchema if it exists
+          if (hasTestReportSchema) {
+            // Assume first column is testId, second is schemaId
+            const testIdCol = 0;
+            const schemaIdCol = 1;
+
+            // For TestReportSchema, we need to include all rows that have data
+            // Filter rows to only those that match an observationGroupAverage OR have existing data
+            const filteredRows = schema.TestReportSchema.TestReportSchema.rows.filter((row: any) => {
+              const testId = row.values?.[schema.TestReportSchema.TestReportSchema.columns[testIdCol]?.id];
+              const schemaId = row.values?.[schema.TestReportSchema.TestReportSchema.columns[schemaIdCol]?.id];
+              
+              // Include if it matches observationGroupAverages OR if it has existing data in schema columns
+              const hasMatchingAverage = observationGroupAverages.some(
+                (avg: any) => avg.testId === testId && avg.schemaId === schemaId
+              );
+              
+              // Check if row has data in schema columns (columns with type 'schema')
+              const hasExistingData = schema.TestReportSchema.TestReportSchema.columns.some((col: any) => {
+                if (col.type === 'schema') {
+                  const value = row.values?.[col.id];
+                  return value !== undefined && value !== null && value !== '';
+                }
+                return false;
+              });
+              
+              return hasMatchingAverage || hasExistingData;
+            });
+
+            if (filteredRows.length > 0) {
+              // For each filtered row, build a new row with values filled in from observationGroupAverages if testId/schemaId match
+              processedTestReportRows = filteredRows.map((row: any) => {
+                const testId = row.values?.[schema.TestReportSchema.TestReportSchema.columns[testIdCol]?.id];
+                const schemaId = row.values?.[schema.TestReportSchema.TestReportSchema.columns[schemaIdCol]?.id];
+
+                // Find matching observationGroupAverage
+                const matchingAverage = observationGroupAverages.find(
+                  (avg: any) => avg.testId === testId && avg.schemaId === schemaId
+                );
+
+                // Find matching observationGroupRawResults
+                const matchingRawResult = observationGroupRawResults.find(
+                  (raw: any) => raw.testId === testId && raw.schemaId === schemaId
+                );
+
+                // Build new values object for averages (resultReport)
+                const newValues: Record<string, any> = {};
+                // Build new values object for raw results (observationEntry)
+                const newRawValues: Record<string, any> = {};
+
+                for (const col of schema.TestReportSchema.TestReportSchema.columns) {
+                  if(col.id === '1'){
+                    newValues[col.id] = row.values?.[col.id];
+                    newRawValues[col.id] = row.values?.[col.id];
+                  }
+                  else if(col.id === '2'){
+                    newValues[col.id] = row.values?.[col.id];
+                    newRawValues[col.id] = row.values?.[col.id];
+                  }                  
+                  else if (col.type === 'schema') {
+                    // For averages (resultReport) - use matching average if available, otherwise use existing value
+                    newValues[col.id] =
+                      matchingAverage && matchingAverage.averages && matchingAverage.averages[col.id] !== undefined
+                        ? matchingAverage.averages[col.id]
+                        : (row.values?.[col.id] || '');
+                    
+                    
+                    // For raw results (observationEntry)
+                    newRawValues[col.id] =
+                      matchingRawResult && matchingRawResult.results && Array.isArray(matchingRawResult.results)
+                        ? matchingRawResult.results.map((resultObj: any) => resultObj[col.id] !== undefined ? resultObj[col.id] : '')
+                        : (row.values?.[col.id] ? [row.values?.[col.id]] : []);
+                  } else {
+                    // Copy as is for both
+                    newValues[col.id] = row.values?.[col.id];
+                    newRawValues[col.id] = row.values?.[col.id];
+                  }
+                }
+                return {
+                  ...row,
+                  values: newValues,           // For resultReport (averages)
+                  //observationEntry: newRawValues // For observationEntry (raw results)
+                };
+              });
+            }
+          }
+
+          // Process ObservationEntrySchema if it exists
+          if (hasObservationEntrySchema) {
+            // Assume first column is testId, second is schemaId
+            const testIdCol = 0;
+            const schemaIdCol = 1;
+
+            // Filter rows to only those that match an observationGroupRawResults
+            const filteredRows = schema.TestReportSchema.ObservationEntrySchema.rows.filter((row: any) => {
+              const testId = row.values?.[schema.TestReportSchema.ObservationEntrySchema.columns[testIdCol]?.id];
+              const schemaId = row.values?.[schema.TestReportSchema.ObservationEntrySchema.columns[schemaIdCol]?.id];
+              return observationGroupRawResults.some(
+                (raw: any) => raw.testId === testId && raw.schemaId === schemaId
+              );
+            });
+
+            if (filteredRows.length > 0) {
+              // For each filtered row, build a new row with values filled in from observationGroupRawResults
+              processedObservationEntryRows = filteredRows.map((row: any) => {
+                const testId = row.values?.[schema.TestReportSchema.ObservationEntrySchema.columns[testIdCol]?.id];
+                const schemaId = row.values?.[schema.TestReportSchema.ObservationEntrySchema.columns[schemaIdCol]?.id];
+
+                // Find matching observationGroupRawResults
+                const matchingRawResult = observationGroupRawResults.find(
+                  (raw: any) => raw.testId === testId && raw.schemaId === schemaId
+                );
+
+                // Build new values object for raw results (observationEntry)
+                const newRawValues: Record<string, any> = {};
+
+                for (const col of schema.TestReportSchema.ObservationEntrySchema.columns) {
+                  if (col.type === 'schema') {
+                    // For raw results (observationEntry)
+                    newRawValues[col.id] =
+                      matchingRawResult && matchingRawResult.results && Array.isArray(matchingRawResult.results)
+                        ? matchingRawResult.results.map((resultObj: any) => resultObj[col.id] !== undefined ? resultObj[col.id] : '')
+                        : [];
+                  } else {
+                    // Copy as is
+                    newRawValues[col.id] = row.values?.[col.id];
+                  }
+                }
+                return {
+                  ...row,
+                  observationEntry: newRawValues // For observationEntry (raw results)
+                };
+              });
+            }
+          }
+
+          // Return schema if either TestReportSchema or ObservationEntrySchema has processed rows
+          if (processedTestReportRows || processedObservationEntryRows) {
+            return {
+              ...schema,
+              TestReportSchema: processedTestReportRows ? {
+                ...schema.TestReportSchema,
+                TestReportSchema: {
+                  ...schema.TestReportSchema.TestReportSchema,
+                  rows: processedTestReportRows
+                }
+              } : schema.TestReportSchema,
+              ObservationEntrySchema: processedObservationEntryRows ? {
+                ...schema.TestReportSchema.ObservationEntrySchema,
+                rows: processedObservationEntryRows
+              } : schema.TestReportSchema.ObservationEntrySchema
+            };
+          }
+
+          return null;
+        })
+        .filter((schema: any) => schema !== null)
+    : [];
+
+
+  // Prepare headers from processedReportSchemas
+  // For each schema, build headers: Sl. No, then all columns except first and second
+  const processedReportHeaders = Array.isArray(processedReportSchemas)
+    ? processedReportSchemas.map((schema: any) => {
+        // Check if schema has TestReportSchema
+        const hasTestReportSchema = schema?.TestReportSchema?.TestReportSchema?.columns && 
+                                  Array.isArray(schema.TestReportSchema.TestReportSchema.columns);
+        
+        // Check if schema has ObservationEntrySchema
+        const hasObservationEntrySchema = schema?.TestReportSchema?.ObservationEntrySchema?.columns && 
+                                       Array.isArray(schema.TestReportSchema.ObservationEntrySchema.columns);
+
+        if (!hasTestReportSchema && !hasObservationEntrySchema) return [];
+
+        let dataColumns: any[] = [];
+        let rows: any[] = [];
+        let averageHeaders: any[] = [];
+        let rawHeaders: any[] = [];
+
+        // Process TestReportSchema if it exists
+        if (hasTestReportSchema) {
+          // Exclude first and second columns for both averages and raw results
+          dataColumns = schema.TestReportSchema.TestReportSchema.columns.slice(2);
+
+          // --- AVERAGES (Result Report) ---
+          averageHeaders = [
+            { id: 'slNo', label: 'Sl. No' },
+            ...dataColumns.map((col: any) => ({
+              id: col.id,
+              label: col.name || col.id,
+              averageCalculationRequired: col.averageCalculationRequired || false
+            }))
+          ];
+
+          rows = schema.TestReportSchema.TestReportSchema.rows;
+        }
+
+        
+        const testNames:string[] = [];
+        const testingMethod:string[] = [];
+              const startDates:string[] = [];
+              const endDates:string[] = [];
+              const productNames:string[] = [];
+              let productId:string = '';
+              let productShortForm:string = '';
+              let reportNo:number = 0;
+        let averageDataRows: any[] = [];
+        let rawDataRows: any[] = [];
+
+        // Process TestReportSchema data if it exists
+        if (hasTestReportSchema && Array.isArray(schema.TestReportSchema.TestReportSchema.rows)) {
+          averageDataRows = schema.TestReportSchema.TestReportSchema.rows.map((row: any, idx: number) => {
+            // Get testId and schemaId from the first and second columns
+            const testIdCol = schema.TestReportSchema.TestReportSchema.columns[0]?.id;
+            const schemaIdCol = schema.TestReportSchema.TestReportSchema.columns[1]?.id;
+            const testId = row.values?.[testIdCol];
+            const schemaId = row.values?.[schemaIdCol];
+
+            // Find the matching observationGroupAverage
+            const filteredObj = observationGroupAverages.find(
+              (avg: any) => avg.testId === testId && avg.schemaId === schemaId
+            );
+            
+            if (filteredObj) {
+              // Set productId and productShortForm at schema level if not already set
+              if (!productId && filteredObj.productId) {
+                productId = filteredObj.productId;
+              }
+              if (!productShortForm && filteredObj.productShortForm) {
+                productShortForm = filteredObj.productShortForm;
+              }
+              if (!reportNo && filteredObj.productId) {
+                const product = data.contractData.products.find((p: any) => p.id === filteredObj.productId);
+                if (product) {
+                  const isNabl = data.contractData.reportType !== 'NON-NABL';
+                  reportNo = isNabl ? (Number(product.reportNo) || 0) : (Number(product.reportNoNonNabl) || 0);
+                }
+              }
+              
+              console.log('TestReportSchema - Set productId:', productId, 'productShortForm:', productShortForm);
+              
+              return {
+                slNo: idx + 1,
+                ...dataColumns.reduce((acc: any, col: any) => {
+
+                  if (filteredObj.productName && !productNames.includes(filteredObj.productName)) {
+                    productNames.push(filteredObj.productName);
+                  }
+
+                  if (filteredObj.startDate && !startDates.includes(filteredObj?.startDate?.toString())) {
+                    startDates.push(filteredObj?.startDate?.toString());
+                  }
+                  if (filteredObj.endDate && !endDates.includes(filteredObj?.endDate?.toString())) {
+                    endDates.push(filteredObj?.endDate?.toString());
+                  }
+
+                  const unitRecords = schema.TestReportSchema.TestReportSchema.columns.find((col: any) => col.name === 'Units');
+
+                  if (row.values[col.id] === 'TestName') {
+                    acc[col.id] = filteredObj.testName ?? '';
+                  } else if (row.values[col.id] === 'TestingMethod') {
+                    acc[col.id] = filteredObj.testingMethod ?? '';
+                  } 
+                  else if(col.type == 'text'){
+                    acc[col.id] = row.values[col.id];
+                  }
+                  else if (unitRecords && unitRecords.id === col.id && col.name === 'Units') {
+                    acc[col.id] = row.values[col.id];
+                  } 
+                  else {
+                    // First, try to get the field names from the row values
+                    // Try different possible keys for the column
+                    let resultArray = row.values?.[col.id];
+                    
+                    // // If not found, try without the 'obs-' prefix
+                    // if (resultArray === undefined && col.id.startsWith('obs-')) {
+                    //   const keyWithoutPrefix = col.id.replace('obs-', '');
+                    //   resultArray = row.values?.[keyWithoutPrefix];
+                    // }
+                    
+                    // If still not found, try to find by matching the column name
+                    if (resultArray === undefined) {
+                      const rowKeys = Object.keys(row.values || {});
+                      // Create a mapping of column indices to field arrays
+                      // We need to map each column to its specific field array
+                      const fieldArrays = rowKeys
+                        .filter(key => Array.isArray(row.values[key]) && row.values[key].length > 0)
+                        .map(key => ({ key, value: row.values[key] }));
+                      
+                      // For now, let's use a simple mapping based on column index
+                      // This is a temporary solution - we need to understand the schema structure better
+                      const columnIndex = dataColumns.findIndex(c => c.id === col.id);
+                      if (fieldArrays.length > columnIndex) {
+                        resultArray = fieldArrays[columnIndex].value;
+                      } else if (fieldArrays.length > 0) {
+                        // Fallback: use the first available field array
+                        resultArray = fieldArrays[0].value;
+                      }
+                    }
+                    
+                    let value = '';
+                    
+                    if (Array.isArray(resultArray)) {
+                      // Extract field names from the array and get their values from averages
+                      const valueArray = resultArray.map((item: string) => {
+                        // If item is a string, use it directly
+                        if (typeof item === 'string') {
+                          const avgValue = filteredObj.averages?.[item];
+                          return avgValue ?? '';
+                        }
+                        return '';
+                      });
+                      value = valueArray.join(' X ');
+                    } else {
+                      // For non-array values, try to get from averages using column ID or name
+                      
+                      // Try to get value from averages using different strategies
+                      if (filteredObj?.averages) {
+                        // Try using column ID directly
+                        value = filteredObj.averages[col.id];
+                        
+                        // If not found, try using column name
+                        if (value === undefined || value === '') {
+                          value = filteredObj.averages[col.name];
+                        }
+                        
+                        // If still not found, try to find by matching field names
+                        if (value === undefined || value === '') {
+                          const fieldNames = Object.keys(filteredObj.averages);
+                          for (const fieldName of fieldNames) {
+                            if (fieldName.toLowerCase().includes(col.name?.toLowerCase() || '') || 
+                                col.name?.toLowerCase().includes(fieldName.toLowerCase() || '')) {
+                              value = filteredObj.averages[fieldName];
+                              break;
+                            }
+                          }
+                        }
+                      }
+                      
+                      // Fallback to original row value
+                      if (value === undefined || value === '') {
+                        value = row.values?.[col.id];
+                      }
+                    }
+                    
+                    acc[col.id] = value ?? '';
+                  }
+                  return acc;
+                }, {})
+              };
+            }
+          }).filter(row => row !== undefined);
+        }
+
+        // Process ObservationEntrySchema if it exists
+        if (hasObservationEntrySchema) {
+          // Exclude first and second columns for raw results
+          dataColumns = schema.TestReportSchema.ObservationEntrySchema.columns.slice(2);
+
+          // --- RAW RESULTS (Observation Entry) ---
+          rawHeaders = [
+            { id: 'slNo', label: 'Sl. No' },
+            ...dataColumns.map((col: any) => ({
+              

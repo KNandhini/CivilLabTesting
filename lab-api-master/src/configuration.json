@@ -1,0 +1,39 @@
+{
+    "consultancyDetails": {
+        "name": "TPT",
+        "address": "",
+        "logo": "",
+        "nablLogo": "",
+        "gstNo": ""
+    },
+    "bankDetails": {
+        "bankName": "",
+        "accountNumber": "",
+        "ifscCode": "",
+        "branch": ""
+    },
+    "formNumbers": {
+        "observationEntry": "TPT/NABLF7-39",
+        "testRequest": "TPT/NABLF7-37",
+        "tocr": "TPT/NABLF7-38",
+        "nabl": "TPT/NABL/F7-37"
+    },
+    "numberPrefixes": {
+        "testReport": "TPT/CCTC/Test/",
+        "ulr": "TC11613",
+        "annualTestRequest": "TPT/{currentYear}-{nextYear}/TRF-"
+    },
+    "codeFormats": {
+        "sample": "{productShort}/CCTC/{monthYear}/0001"
+    },
+    "systemSettings": {
+        "id": "primary-key",
+        "data": {
+            "exampleSetting1": "value1",
+            "exampleSetting2": "value2",
+            "exampleSetting3": {
+                "nestedKey": "nestedValue"
+            }
+        }
+    }
+}
